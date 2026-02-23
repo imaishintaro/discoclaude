@@ -15,6 +15,7 @@ import {
   type FSWatcher,
 } from "fs";
 import { dirname, join, resolve } from "path";
+import type { CodingAgentService } from "./multi-agent";
 
 const exec = promisify(execCb);
 
@@ -114,6 +115,8 @@ export class ClaudeSessionManager {
   private persistPath: string;
   // memory/ ディレクトリの変更を監視するウォッチャー
   private memoryWatcher: FSWatcher | null = null;
+  // コーディングエージェント（マルチエージェント機能）
+  private codingAgent: CodingAgentService | null = null;
 
   constructor(workDir: string, defaultModel: string) {
     this.defaultWorkDir = workDir;
@@ -465,6 +468,13 @@ export class ClaudeSessionManager {
    * EMBEDDING_API_KEY が未設定の場合は起動しない。
    * 既に起動済みの場合は何もしない。
    */
+  /**
+   * コーディングエージェントを設定する（マルチエージェント機能の有効化）
+   */
+  setCodingAgent(agent: CodingAgentService): void {
+    this.codingAgent = agent;
+  }
+
   startMemoryWatcher(): void {
     if (!process.env.EMBEDDING_API_KEY) return;
     if (this.memoryWatcher) return;
@@ -621,8 +631,9 @@ export class ClaudeSessionManager {
   /**
    * Vercel AI SDK 用のツール一覧を構築する。
    * すべてのファイルアクセスは workDir 内に制限される。
+   * onProgress が渡された場合、ConsultCodingAgent でユーザーへの進捗通知を行う。
    */
-  private buildTools(workDir: string) {
+  private buildTools(workDir: string, channelId: string, onProgress?: ProgressCallback) {
     // パスが workDir 内であることを確認し、絶対パスを返す
     const checkPath = (p: string): string => {
       const abs = resolve(workDir, p);
@@ -831,6 +842,31 @@ export class ClaudeSessionManager {
           }
         },
       }),
+
+      // コーディングエージェントへの相談ツール（マルチエージェント）
+      ...(this.codingAgent ? {
+        ConsultCodingAgent: tool({
+          description: "コーディング専門のAIエージェントに相談する。プログラムの作成・修正・デバッグが必要な場合に使用する。コーディングエージェントはワークスペース内でファイルの作成・編集・コマンド実行が可能。仕様提案→実装の2フェーズで自動実行される。",
+          inputSchema: zodSchema(z.object({
+            task: z.string().describe("コーディングエージェントへの依頼内容（何を作るか、要件、制約など）"),
+          })),
+          execute: async (input: { task: string }) => {
+            if (!this.codingAgent) return "Error: コーディングエージェントが設定されていません";
+
+            // ユーザーに「コーディングエージェントに相談中」と通知
+            if (onProgress) {
+              onProgress({ type: "tool_progress", toolName: "ConsultCodingAgent", elapsedSeconds: 0 });
+            }
+
+            // コーディングエージェントの進捗をユーザーチャンネルに中継するコールバック
+            const progressCb = onProgress ? (msg: string) => {
+              onProgress({ type: "tool_summary", summary: msg });
+            } : undefined;
+
+            return await this.codingAgent.consult(input.task, workDir, channelId, progressCb);
+          },
+        }),
+      } : {}),
     };
   }
 
@@ -971,7 +1007,7 @@ export class ClaudeSessionManager {
         model: this.buildModel(channelId),
         system,
         messages,
-        tools: this.buildTools(workDir),
+        tools: this.buildTools(workDir, channelId, onProgress),
         // maxSteps: 50 は AI SDK v6 では stopWhen で指定する
         stopWhen: stepCountIs(50),
         onStepFinish: ({ text, toolCalls, toolResults }) => {
@@ -985,6 +1021,7 @@ export class ClaudeSessionManager {
           // ツール呼び出し（名前と入力パラメータ）
           if (toolCalls) {
             for (const tc of toolCalls) {
+              if (!tc) continue;
               onProgress({
                 type: "tool_call",
                 toolName: tc.toolName,
@@ -996,6 +1033,7 @@ export class ClaudeSessionManager {
           // ツール実行結果
           if (toolResults) {
             for (const tr of toolResults) {
+              if (!tr) continue;
               const rawOutput = (tr as any).output;
               const output = typeof rawOutput === "string"
                 ? rawOutput
