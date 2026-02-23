@@ -84,6 +84,8 @@ type PersistedData = {
     userPrompt: string;
     assistantResponse: string;
   }>>;
+  // チャット履歴（AI SDKのModelMessage[]をそのままJSON化して保存）
+  chatHistory?: Record<string, ModelMessage[]>;
 };
 
 /**
@@ -514,7 +516,7 @@ export class ClaudeSessionManager {
 
   /**
    * セッションデータをファイルから読み込む
-   * chatHistory はメモリのみ（再起動でリセット）
+   * chatHistory も永続化対象（再起動後も会話を継続可能）
    */
   private load(): void {
     if (!existsSync(this.persistPath)) return;
@@ -531,7 +533,17 @@ export class ClaudeSessionManager {
           turns.map((t) => ({ ...t, timestamp: new Date(t.timestamp) }))
         );
       }
-      console.log(`セッションデータを読み込みました（履歴${this.conversationHistory.size}チャンネル）`);
+      // チャット履歴を復元（AI SDK ModelMessage[]）
+      if (data.chatHistory) {
+        for (const [channelId, messages] of Object.entries(data.chatHistory)) {
+          if (messages && messages.length > 0) {
+            this.chatHistory.set(channelId, messages);
+          }
+        }
+        console.log(`セッションデータを読み込みました（チャット${this.chatHistory.size}ch, 履歴${this.conversationHistory.size}ch）`);
+      } else {
+        console.log(`セッションデータを読み込みました（履歴${this.conversationHistory.size}チャンネル）`);
+      }
     } catch {
       console.error("セッションデータの読み込みに失敗しました（新規作成します）");
     }
@@ -539,10 +551,19 @@ export class ClaudeSessionManager {
 
   /**
    * セッションデータをファイルに保存する
-   * chatHistory はメモリのみのため保存しない
+   * chatHistory も永続化し、再起動後も会話を継続可能にする
    */
   private save(): void {
     try {
+      // chatHistory は直近40メッセージのみ保存（ファイルサイズ抑制）
+      const MAX_PERSISTED_MESSAGES = 40;
+      const chatHistoryToSave: Record<string, ModelMessage[]> = {};
+      for (const [channelId, messages] of this.chatHistory.entries()) {
+        if (messages.length > 0) {
+          chatHistoryToSave[channelId] = messages.slice(-MAX_PERSISTED_MESSAGES);
+        }
+      }
+
       const data: PersistedData = {
         channelModels: Object.fromEntries(this.channelModels),
         workspaces: Object.fromEntries(this.workspaces),
@@ -554,6 +575,7 @@ export class ClaudeSessionManager {
             v.map((t) => ({ ...t, timestamp: t.timestamp.toISOString() })),
           ])
         ),
+        chatHistory: chatHistoryToSave,
       };
       writeFileSync(this.persistPath, JSON.stringify(data, null, 2), "utf-8");
     } catch {
