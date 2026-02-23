@@ -484,17 +484,43 @@ export class CodingAgentService {
       }
     };
 
+    // 完了判定: テキストに「完了」を示すキーワードが含まれるか
+    const looksComplete = (text: string): boolean => {
+      const completionPatterns = [
+        /(?:以上|これ)(?:で|が)(?:完了|終了|実装完了)/,
+        /すべて(?:の|）)?(?:ファイル|実装|作業).*(?:完了|作成|終了)/,
+        /最終報告/,
+        /実装が完了しました/,
+        /作成・変更したファイル/,
+      ];
+      return completionPatterns.some(p => p.test(text));
+    };
+
     try {
       // 自動継続ループ: モデルがツールを使った後に止まったら「続けて」と促す
       for (let round = 0; round < MAX_CONTINUATION_ROUNDS; round++) {
-        console.log(`[MultiAgent] Phase 2 ラウンド ${round + 1}/${MAX_CONTINUATION_ROUNDS}`);
+        // 最終ラウンドかどうか（最終ラウンドはツール強制なし → 報告させる）
+        const isFinalRound = round === MAX_CONTINUATION_ROUNDS - 1;
+
+        console.log(`[MultiAgent] Phase 2 ラウンド ${round + 1}/${MAX_CONTINUATION_ROUNDS}${isFinalRound ? " (最終)" : ""}`);
 
         const result = await generateText({
           model: this.buildModel(),
           system: implSystemPrompt,
           messages: implMessages,
           tools: this.buildCodingTools(workDir),
-          stopWhen: stepCountIs(30),
+          toolChoice: isFinalRound ? "auto" : "required",
+          stopWhen: stepCountIs(50),
+          // ステップごとにtoolChoiceを動的制御:
+          // 残り5ステップになったら "auto" に切り替えて報告テキストを生成させる
+          prepareStep: ({ stepNumber }) => {
+            if (isFinalRound) return {};
+            // 残り5ステップで auto に切り替え（報告用）
+            if (stepNumber >= 45) {
+              return { toolChoice: "auto" as const };
+            }
+            return {};
+          },
           onStepFinish,
         });
 
@@ -508,14 +534,26 @@ export class CodingAgentService {
           (s: any) => s.toolCalls && s.toolCalls.length > 0
         ) ?? false;
 
-        // ツールを使っていない = テキスト応答のみ → 完了とみなす
+        // ステップ数を取得
+        const stepCount = result.steps?.length ?? 0;
+
+        console.log(`[MultiAgent] Phase 2 ラウンド ${round + 1}: ${stepCount}ステップ, ツール使用: ${usedTools}`);
+
+        // 完了判定:
+        // 1. ツール未使用 → テキストのみ → 完了
+        // 2. テキストが完了報告っぽい → 完了
+        // 3. 最終ラウンド → 強制終了
         if (!usedTools) {
           console.log(`[MultiAgent] Phase 2 ラウンド ${round + 1}: ツール未使用 → 完了`);
           break;
         }
 
-        // 最終ラウンドなら終了
-        if (round === MAX_CONTINUATION_ROUNDS - 1) {
+        if (finalText && looksComplete(finalText)) {
+          console.log(`[MultiAgent] Phase 2 ラウンド ${round + 1}: 完了報告を検出 → 完了`);
+          break;
+        }
+
+        if (isFinalRound) {
           console.log(`[MultiAgent] Phase 2: 最大ラウンド数(${MAX_CONTINUATION_ROUNDS})に到達`);
           break;
         }
@@ -524,8 +562,9 @@ export class CodingAgentService {
         implMessages.push({
           role: "user" as const,
           content:
-            "まだ実装が残っていれば続けてください。ツールを使って実際にファイルを作成・編集してください。\n" +
-            "すべて完了していれば、作成・変更したファイルの一覧と実行方法を最終報告としてまとめてください。",
+            "実装を続けてください。仕様で提案した機能がまだ残っています。\n" +
+            "ツールを使って実際にファイルを作成・編集してください。\n" +
+            "すべて完了した場合のみ、作成・変更したファイルの一覧と実行方法を最終報告としてまとめてください。",
         });
 
         progressLines.push(`\n--- 🔄 継続ラウンド ${round + 2} ---`);
