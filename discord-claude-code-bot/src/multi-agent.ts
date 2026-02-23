@@ -39,17 +39,21 @@ export class CodingAgentService {
   ) {}
 
   /**
-   * AIモデルを構築する（ClaudeSessionManager.buildModel と同じロジック）
+   * AIモデルを構築する
+   * CODING_AGENT_MODEL 環境変数が設定されていればそれを優先、なければデフォルトモデルを使用
    */
   private buildModel() {
+    // コーディングエージェント専用モデル（環境変数で上書き可能）
+    const model = process.env.CODING_AGENT_MODEL || this.defaultModel;
+
     if (process.env.OPENROUTER_API_KEY) {
       const openrouter = createOpenAI({
         baseURL: "https://openrouter.ai/api/v1",
         apiKey: process.env.OPENROUTER_API_KEY,
       });
-      return openrouter.chat(this.defaultModel);
+      return openrouter.chat(model);
     } else {
-      const modelId = this.defaultModel.replace(/^[^/]+\//, "");
+      const modelId = model.replace(/^[^/]+\//, "");
       const anthropic = createAnthropic({
         apiKey: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || "",
       });

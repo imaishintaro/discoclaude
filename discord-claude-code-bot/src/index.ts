@@ -21,6 +21,7 @@ import { Readable } from "stream";
 import { resolve, basename, join } from "path";
 import { ClaudeSessionManager, type ProgressEvent } from "./claude-session";
 import { CronRunner, describeSchedule } from "./cron-runner";
+import { CodingAgentService } from "./multi-agent";
 
 const exec = promisify(execCb);
 
@@ -188,6 +189,7 @@ function toolDisplayName(toolName: string): string {
     Grep: "テキスト検索",
     WebFetch: "Web取得",
     WebSearch: "Web検索",
+    ConsultCodingAgent: "コーディングエージェント相談",
     Task: "サブタスク",
     TodoWrite: "タスク管理",
   };
@@ -642,6 +644,8 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
       return String(input.url || "").slice(0, 80);
     case "WebSearch":
       return String(input.query || "").slice(0, 80);
+    case "ConsultCodingAgent":
+      return String(input.task || "").slice(0, 80);
     default:
       return JSON.stringify(input).slice(0, 100);
   }
@@ -720,6 +724,15 @@ client.once("ready", () => {
 
   // Cronスケジューラーを起動
   cronRunner.start();
+
+  // マルチエージェント: AGENT_CHAT_CHANNEL_ID が設定されていればコーディングエージェントを有効化
+  const agentChatChannelId = process.env.AGENT_CHAT_CHANNEL_ID;
+  if (agentChatChannelId) {
+    const codingAgent = new CodingAgentService(DEFAULT_MODEL, client, agentChatChannelId);
+    sessionManager.setCodingAgent(codingAgent);
+    const codingModel = process.env.CODING_AGENT_MODEL || DEFAULT_MODEL;
+    console.log(`[MultiAgent] コーディングエージェント有効 → チャンネルID: ${agentChatChannelId}, モデル: ${codingModel}`);
+  }
 
   // メモリファイルの変更を監視してエンベディングを自動更新
   sessionManager.startMemoryWatcher();
