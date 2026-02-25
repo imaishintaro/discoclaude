@@ -21,6 +21,8 @@ const EMBED_COLORS = {
   spec: 0x9b59b6,      // 紫: コーダーの仕様提案
   progress: 0xf59e0b,  // 黄色: コーダーのツール実行中
   complete: 0x2ecc71,  // 緑: コーダーの最終回答
+  review: 0x3498db,    // 青: レビュー結果
+  feedback: 0xe67e22,  // オレンジ: クロウからの修正依頼
 } as const;
 
 // Embedのdescription文字数上限
@@ -291,94 +293,118 @@ export class CodingAgentService {
    * コーディングエージェントを起動し、タスクを実行する。
    * 途中経過を #agent-chat に投稿し、最終結果を返す。
    *
-   * 2フェーズで実行:
-   * - Phase 1: 仕様提案（ツールなし）→ 設計・ファイル構成を提案
+   * 3フェーズで実行:
+   * - Phase 1: 仕様提案（ツールなし）→ 設計・ファイル構成を提案（feedbackモード時はスキップ）
    * - Phase 2: 実装（ツールあり）→ 仕様に基づいてコードを書く
+   * - Phase 3: 内部レビュー → レビュー＆修正ループ（最大3回）
+   *
+   * options.feedback が指定された場合はフィードバックモード:
+   * Phase 1 をスキップし、フィードバック内容に基づいて修正を実行する
    */
   async consult(
     task: string,
     workDir: string,
     callerChannelId: string,
-    onProgress?: (message: string) => void
+    onProgress?: (message: string) => void,
+    options?: { feedback?: string }
   ): Promise<string> {
     const agentChat = await this.getAgentChatChannel();
     const startTime = Date.now();
+    const isFeedbackMode = !!(options?.feedback);
 
-    // 1. #agent-chat にクロウからの相談内容を投稿（青灰色）
+    // 1. #agent-chat にクロウからの相談内容を投稿
     if (agentChat) {
-      const requestEmbed = new EmbedBuilder()
-        .setColor(EMBED_COLORS.request)
-        .setAuthor({ name: "🐾 クロウ → コーダー" })
-        .setDescription(task.slice(0, EMBED_MAX_LENGTH))
-        .setFooter({ text: `相談元: <#${callerChannelId}>` })
-        .setTimestamp();
-      await agentChat.send({ embeds: [requestEmbed] });
+      if (isFeedbackMode) {
+        // フィードバックモード: オレンジ色のEmbed
+        const feedbackEmbed = new EmbedBuilder()
+          .setColor(EMBED_COLORS.feedback)
+          .setAuthor({ name: "🐾 クロウ → コーダー（修正依頼）" })
+          .setDescription(`**元タスク:** ${task.slice(0, 500)}\n\n**修正依頼:** ${options!.feedback!.slice(0, EMBED_MAX_LENGTH - 600)}`)
+          .setFooter({ text: `相談元: <#${callerChannelId}>` })
+          .setTimestamp();
+        await agentChat.send({ embeds: [feedbackEmbed] });
+      } else {
+        // 通常モード: 青灰色のEmbed
+        const requestEmbed = new EmbedBuilder()
+          .setColor(EMBED_COLORS.request)
+          .setAuthor({ name: "🐾 クロウ → コーダー" })
+          .setDescription(task.slice(0, EMBED_MAX_LENGTH))
+          .setFooter({ text: `相談元: <#${callerChannelId}>` })
+          .setTimestamp();
+        await agentChat.send({ embeds: [requestEmbed] });
+      }
     }
 
-    console.log(`[MultiAgent] コーディングエージェント起動: ${task.slice(0, 100)}...`);
-
-    // ========================================
-    // Phase 1: 仕様提案（ツールなし）
-    // ========================================
-    if (onProgress) {
-      onProgress("📋 コーダーと仕様を相談中...");
-    }
-
-    const specSystemPrompt = [
-      "あなたはコーディング専門のAIエンジニアです。",
-      "汎用エージェント「クロウ」から依頼を受けて、プログラミングタスクの**仕様を提案**します。",
-      "",
-      "## このフェーズでやること",
-      "まずコードを書く前に、以下の仕様を日本語で提案してください:",
-      "1. **機能一覧** — 実装する機能の箇条書き",
-      "2. **技術選定** — 使用する言語・ライブラリ・フレームワーク",
-      "3. **ファイル構成** — 作成するファイルとその役割",
-      "4. **実装方針** — アーキテクチャやデータ構造の概要",
-      "",
-      "## ルール",
-      "- コードは書かず、仕様の提案のみ行ってください",
-      "- 簡潔だが具体的にまとめること",
-      "- ユーザーの意図を汲み取り、必要に応じて追加提案をすること",
-      "",
-      `## ワークスペース: ${workDir}`,
-      "このディレクトリ内でファイルを作成・編集します（次のフェーズで実装）。",
-    ].join("\n");
+    console.log(`[MultiAgent] コーディングエージェント起動${isFeedbackMode ? "（修正モード）" : ""}: ${task.slice(0, 100)}...`);
 
     let specText = "";
 
-    try {
-      console.log("[MultiAgent] Phase 1: 仕様提案を生成中...");
-
-      const specResult = await generateText({
-        model: this.buildModel(),
-        system: specSystemPrompt,
-        prompt: task,
-        // ツールなし: 仕様提案のみ
-      });
-
-      specText = specResult.text || "";
-
-      // 仕様提案を #agent-chat に投稿（紫）
-      if (agentChat && specText) {
-        const specEmbed = new EmbedBuilder()
-          .setColor(EMBED_COLORS.spec)
-          .setAuthor({ name: "📋 コーダー 仕様提案" })
-          .setDescription(specText.slice(0, EMBED_MAX_LENGTH))
-          .setTimestamp();
-        await agentChat.send({ embeds: [specEmbed] });
+    // ========================================
+    // Phase 1: 仕様提案（ツールなし）— フィードバックモード時はスキップ
+    // ========================================
+    if (!isFeedbackMode) {
+      if (onProgress) {
+        onProgress("📋 コーダーと仕様を相談中...");
       }
 
-      console.log(`[MultiAgent] Phase 1 完了: 仕様提案 ${specText.length}文字`);
+      const specSystemPrompt = [
+        "あなたはコーディング専門のAIエンジニアです。",
+        "汎用エージェント「クロウ」から依頼を受けて、プログラミングタスクの**仕様を提案**します。",
+        "",
+        "## このフェーズでやること",
+        "まずコードを書く前に、以下の仕様を日本語で提案してください:",
+        "1. **機能一覧** — 実装する機能の箇条書き",
+        "2. **技術選定** — 使用する言語・ライブラリ・フレームワーク",
+        "3. **ファイル構成** — 作成するファイルとその役割",
+        "4. **実装方針** — アーキテクチャやデータ構造の概要",
+        "",
+        "## ルール",
+        "- コードは書かず、仕様の提案のみ行ってください",
+        "- 簡潔だが具体的にまとめること",
+        "- ユーザーの意図を汲み取り、必要に応じて追加提案をすること",
+        "",
+        `## ワークスペース: ${workDir}`,
+        "このディレクトリ内でファイルを作成・編集します（次のフェーズで実装）。",
+      ].join("\n");
 
-      if (onProgress) {
-        onProgress("📋 仕様提案が完了しました。実装を開始します...");
+      try {
+        console.log("[MultiAgent] Phase 1: 仕様提案を生成中...");
+
+        const specResult = await generateText({
+          model: this.buildModel(),
+          system: specSystemPrompt,
+          prompt: task,
+        });
+
+        specText = specResult.text || "";
+
+        // 仕様提案を #agent-chat に投稿（紫）
+        if (agentChat && specText) {
+          const specEmbed = new EmbedBuilder()
+            .setColor(EMBED_COLORS.spec)
+            .setAuthor({ name: "📋 コーダー 仕様提案" })
+            .setDescription(specText.slice(0, EMBED_MAX_LENGTH))
+            .setTimestamp();
+          await agentChat.send({ embeds: [specEmbed] });
+        }
+
+        console.log(`[MultiAgent] Phase 1 完了: 仕様提案 ${specText.length}文字`);
+
+        if (onProgress) {
+          onProgress("📋 仕様提案が完了しました。実装を開始します...");
+        }
+
+      } catch (err: any) {
+        console.error("[MultiAgent] Phase 1 エラー:", err);
+        if (onProgress) {
+          onProgress("⚠️ 仕様提案でエラーが発生しましたが、実装を続行します...");
+        }
       }
-
-    } catch (err: any) {
-      console.error("[MultiAgent] Phase 1 エラー:", err);
-      // 仕様提案が失敗しても、Phase 2 に進む（specText が空のまま）
+    } else {
+      // フィードバックモード: Phase 1 スキップ
+      console.log("[MultiAgent] フィードバックモード: Phase 1 スキップ");
       if (onProgress) {
-        onProgress("⚠️ 仕様提案でエラーが発生しましたが、実装を続行します...");
+        onProgress("🔧 修正依頼を受けて実装を開始します...");
       }
     }
 
@@ -405,10 +431,28 @@ export class CodingAgentService {
       "このディレクトリ内でのみファイル操作が可能です。",
     ].join("\n");
 
-    // 仕様提案をコンテキストに含めたプロンプト
-    const implPrompt = specText
-      ? `## 依頼内容\n${task}\n\n## 先ほど提案した仕様\n以下の仕様に基づいて実装してください:\n\n${specText}`
-      : task;
+    // 実装プロンプトの構築（通常モード / フィードバックモード）
+    let implPrompt: string;
+    if (isFeedbackMode) {
+      // フィードバックモード: 修正指示に基づいて実装
+      implPrompt = [
+        `## 元の依頼内容\n${task}`,
+        "",
+        `## クロウからの修正依頼`,
+        `以下のフィードバックに基づいて、既存の実装を修正してください:`,
+        "",
+        options!.feedback!,
+        "",
+        "## 注意",
+        "- 修正が必要な箇所のみ変更し、他の部分は触らないこと",
+        "- 修正完了後、変更した内容を簡潔に報告すること",
+      ].join("\n");
+    } else {
+      // 通常モード: 仕様提案をコンテキストに含める
+      implPrompt = specText
+        ? `## 依頼内容\n${task}\n\n## 先ほど提案した仕様\n以下の仕様に基づいて実装してください:\n\n${specText}`
+        : task;
+    }
 
     // 進捗トラッキング用の変数（ラウンド間で共有）
     const progressLines: string[] = [];
@@ -576,6 +620,152 @@ export class CodingAgentService {
 
       if (!finalText) {
         finalText = "(コーディングエージェントからの応答なし)";
+      }
+
+      // ========================================
+      // Phase 3: 内部レビュー＆修正ループ（最大3回）
+      // ========================================
+      const MAX_REVIEW_ROUNDS = 3;
+
+      for (let reviewRound = 0; reviewRound < MAX_REVIEW_ROUNDS; reviewRound++) {
+        console.log(`[MultiAgent] Phase 3: レビューラウンド ${reviewRound + 1}/${MAX_REVIEW_ROUNDS}`);
+
+        if (onProgress) {
+          onProgress(`🔍 内部レビュー中... (ラウンド ${reviewRound + 1}/${MAX_REVIEW_ROUNDS})`);
+        }
+
+        // レビュー用システムプロンプト
+        const reviewSystemPrompt = [
+          "あなたはコードレビューの専門家です。",
+          "コーディングエージェントが実装した内容をレビューしてください。",
+          "",
+          "## レビュー観点",
+          "1. 要件を満たしているか（依頼内容と一致するか）",
+          "2. コードの品質（可読性、保守性、エラー処理）",
+          "3. バグや問題がないか",
+          "4. セキュリティ上の懸念がないか",
+          "",
+          "## 回答形式",
+          "必ず以下のJSON形式で回答してください。JSON以外のテキストは含めないでください:",
+          '```json',
+          '{',
+          '  "approved": true/false,',
+          '  "score": 1-10,',
+          '  "issues": ["問題点1", "問題点2"],',
+          '  "suggestions": ["改善提案1", "改善提案2"],',
+          '  "summary": "レビュー結果の要約"',
+          '}',
+          '```',
+          "",
+          "- score が 7以上なら approved: true にしてください",
+          "- score が 7未満なら approved: false にして、issues に具体的な修正指示を書いてください",
+        ].join("\n");
+
+        const reviewPrompt = [
+          `## 元の依頼内容\n${task}`,
+          "",
+          `## コーディングエージェントの実行報告\n${finalText}`,
+          "",
+          `## 実行ログ（参考）\n${progressLines.slice(-30).join("\n")}`,
+        ].join("\n");
+
+        try {
+          const reviewResult = await generateText({
+            model: this.buildModel(),
+            system: reviewSystemPrompt,
+            prompt: reviewPrompt,
+            // ツールなし: レビューのみ
+          });
+
+          const reviewText = reviewResult.text || "";
+
+          // JSONを抽出（```json ... ``` またはそのまま）
+          let reviewData: { approved: boolean; score: number; issues: string[]; suggestions: string[]; summary: string };
+          try {
+            const jsonMatch = reviewText.match(/```json\s*([\s\S]*?)\s*```/) || reviewText.match(/(\{[\s\S]*\})/);
+            reviewData = JSON.parse(jsonMatch?.[1] || reviewText);
+          } catch {
+            console.warn("[MultiAgent] Phase 3: レビューJSONのパースに失敗。承認として扱います。");
+            // パース失敗時は承認として扱う
+            reviewData = { approved: true, score: 7, issues: [], suggestions: [], summary: reviewText.slice(0, 200) };
+          }
+
+          console.log(`[MultiAgent] Phase 3 レビュー結果: スコア ${reviewData.score}/10, 承認: ${reviewData.approved}`);
+
+          // レビュー結果を #agent-chat に投稿（青）
+          if (agentChat) {
+            const isApproved = reviewData.approved || reviewData.score >= 7;
+            const reviewEmbed = new EmbedBuilder()
+              .setColor(EMBED_COLORS.review)
+              .setAuthor({ name: isApproved ? `✅ レビュー承認 (${reviewData.score}/10)` : `🔄 レビュー修正必要 (${reviewData.score}/10)` })
+              .setDescription([
+                reviewData.summary,
+                ...(reviewData.issues.length > 0 ? [`\n**問題点:**\n${reviewData.issues.map(i => `- ${i}`).join("\n")}`] : []),
+                ...(reviewData.suggestions.length > 0 ? [`\n**改善提案:**\n${reviewData.suggestions.map(s => `- ${s}`).join("\n")}`] : []),
+              ].join("\n").slice(0, EMBED_MAX_LENGTH))
+              .setTimestamp();
+            await agentChat.send({ embeds: [reviewEmbed] });
+          }
+
+          // 承認されたらレビューループ終了
+          if (reviewData.approved || reviewData.score >= 7) {
+            console.log(`[MultiAgent] Phase 3: レビュー承認 → 完了`);
+            if (onProgress) {
+              onProgress(`✅ 内部レビュー承認 (${reviewData.score}/10)`);
+            }
+            break;
+          }
+
+          // 未承認: 修正指示を作成してPhase 2的に再実行
+          console.log(`[MultiAgent] Phase 3: 未承認 → 修正ラウンド ${reviewRound + 1}`);
+
+          if (onProgress) {
+            onProgress(`🔧 レビュー指摘に基づき修正中... (${reviewData.score}/10)`);
+          }
+
+          // 修正プロンプトを構築
+          const fixPrompt = [
+            "## レビューで以下の問題が指摘されました。修正してください。",
+            "",
+            `**スコア:** ${reviewData.score}/10`,
+            "",
+            "**問題点:**",
+            ...reviewData.issues.map(i => `- ${i}`),
+            "",
+            ...(reviewData.suggestions.length > 0 ? [
+              "**改善提案:**",
+              ...reviewData.suggestions.map(s => `- ${s}`),
+              "",
+            ] : []),
+            "上記の問題を修正し、完了したら変更内容を報告してください。",
+          ].join("\n");
+
+          // 修正ログの区切り
+          progressLines.push(`\n--- 🔍 レビュー修正ラウンド ${reviewRound + 1} ---`);
+
+          // 修正を実行（Phase 2 と同じツールを使用）
+          implMessages.push({ role: "user" as const, content: fixPrompt });
+
+          const fixResult = await generateText({
+            model: this.buildModel(),
+            system: implSystemPrompt,
+            messages: implMessages,
+            tools: this.buildCodingTools(workDir),
+            toolChoice: "auto",
+            stopWhen: stepCountIs(30),
+            onStepFinish,
+          });
+
+          finalText = fixResult.text || finalText;
+          implMessages = [...implMessages, ...fixResult.response.messages];
+
+          console.log(`[MultiAgent] Phase 3: 修正完了 (ラウンド ${reviewRound + 1})`);
+
+        } catch (err: any) {
+          console.error(`[MultiAgent] Phase 3 レビューエラー (ラウンド ${reviewRound + 1}):`, err);
+          // レビューエラー時はループを抜けて結果を返す
+          break;
+        }
       }
 
       // 最終回答を #agent-chat に投稿（緑）

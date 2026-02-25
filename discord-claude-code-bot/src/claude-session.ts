@@ -868,11 +868,18 @@ export class ClaudeSessionManager {
       // コーディングエージェントへの相談ツール（マルチエージェント）
       ...(this.codingAgent ? {
         ConsultCodingAgent: tool({
-          description: "コーディング専門のAIエージェントに相談する。プログラムの作成・修正・デバッグが必要な場合に使用する。コーディングエージェントはワークスペース内でファイルの作成・編集・コマンド実行が可能。仕様提案→実装の2フェーズで自動実行される。",
+          description: [
+            "コーディング専門のAIエージェントに相談する。プログラムの作成・修正・デバッグが必要な場合に使用する。",
+            "コーディングエージェントはワークスペース内でファイルの作成・編集・コマンド実行が可能。",
+            "仕様提案→実装→内部レビューの3フェーズで自動実行される。",
+            "結果を確認し、問題があればfeedback付きで再呼び出しすること。",
+            "feedback指定時は仕様提案をスキップして修正を直接実行する。",
+          ].join(""),
           inputSchema: zodSchema(z.object({
             task: z.string().describe("コーディングエージェントへの依頼内容（何を作るか、要件、制約など）"),
+            feedback: z.string().optional().describe("前回の結果に対する修正依頼（例: 「エラー処理を追加して」「XをYに変更して」）。指定すると仕様提案をスキップして修正モードで実行される"),
           })),
-          execute: async (input: { task: string }) => {
+          execute: async (input: { task: string; feedback?: string }) => {
             if (!this.codingAgent) return "Error: コーディングエージェントが設定されていません";
 
             // ユーザーに「コーディングエージェントに相談中」と通知
@@ -885,7 +892,10 @@ export class ClaudeSessionManager {
               onProgress({ type: "tool_summary", summary: msg });
             } : undefined;
 
-            return await this.codingAgent.consult(input.task, workDir, channelId, progressCb);
+            // feedback が指定されていればフィードバックモードで実行
+            const consultOptions = input.feedback ? { feedback: input.feedback } : undefined;
+
+            return await this.codingAgent.consult(input.task, workDir, channelId, progressCb, consultOptions);
           },
         }),
       } : {}),
