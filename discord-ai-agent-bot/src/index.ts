@@ -41,6 +41,11 @@ import { ImageAgent } from "./agents/image-agent";
 import { CronRunner, describeSchedule } from "./cron-runner";
 import { EMBED_COLOR } from "./utils/embed-colors";
 
+// package.json からバージョン情報を取得
+const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+const BOT_VERSION = pkg.version as string;
+const BOT_NAME = pkg.name as string;
+
 // ========================================
 // 環境変数の読み込みと検証
 // ========================================
@@ -678,7 +683,7 @@ async function sendResponse(
 // ========================================
 
 client.once("ready", () => {
-  log("🚀 起動完了", C.green, `${client.user?.tag}`);
+  log("🚀 起動完了", C.green, `${BOT_NAME} v${BOT_VERSION} — ${client.user?.tag}`);
   console.log(`  作業ディレクトリ: ${WORK_DIR}`);
   console.log(`  デフォルトモデル: ${DEFAULT_MODEL}`);
   console.log(
