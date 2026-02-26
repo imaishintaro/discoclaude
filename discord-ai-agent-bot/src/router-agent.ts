@@ -158,6 +158,15 @@ export class RouterAgent {
         stopWhen: stepCountIs(10),
       });
 
+      // --- デバッグ: ツール呼び出し状況をログ出力 ---
+      const toolCalls = result.steps?.flatMap((s: any) => s.toolCalls || []) || [];
+      console.log(
+        `[RouterAgent] generateText完了: steps=${result.steps?.length || 0}, toolCalls=${toolCalls.length}`,
+        toolCalls.length > 0
+          ? toolCalls.map((tc: any) => tc.toolName || tc.type).join(", ")
+          : "(なし)"
+      );
+
       // --- 応答テキストを取得 ---
       const responseText =
         result.text || "すみません、うまく応答を生成できませんでした。";
@@ -171,23 +180,16 @@ export class RouterAgent {
         );
       }
 
-      // --- delegateTaskコールバックの非同期実行 ---
-      if (delegatedTask && this.options.onDelegateTask) {
-        // コールバックはバックグラウンドで実行（応答を待たない）
-        this.options
-          .onDelegateTask(
-            delegatedTask.taskType,
-            delegatedTask.taskDescription,
-            channelId
-          )
-          .catch((err) => {
-            console.error(
-              `[RouterAgent] タスク委譲コールバックエラー (${delegatedTask!.taskType}):`,
-              err
-            );
-          });
+      // delegatedTask の状態をログ出力（デバッグ用）
+      if (delegatedTask) {
+        console.log(
+          `[RouterAgent] delegateTaskツール呼び出し検出: type=${delegatedTask.taskType}`
+        );
+      } else {
+        console.log("[RouterAgent] delegateTaskツールは呼ばれませんでした");
       }
 
+      // ※ 実際のチーム起動は index.ts 側で行う（二重呼び出し防止）
       return {
         response: responseText,
         delegatedTask,
