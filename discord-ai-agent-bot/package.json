@@ -15,7 +15,6 @@
     "@langchain/core": "^0.3.0",
     "@langchain/langgraph": "^0.2.0",
     "ai": "^6.0.97",
-    "better-sqlite3": "^9.6.0",
     "canvas": "^2.11.2",
     "chokidar": "^3.6.0",
     "discord.js": "^14.18.0",
@@ -25,11 +24,9 @@
     "node-schedule": "^2.1.1",
     "pptxgenjs": "^3.12.0",
     "sharp": "^0.33.0",
-    "tavily": "^0.0.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.8",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/node-schedule": "^2.1.8",

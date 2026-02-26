@@ -182,10 +182,10 @@ const client = new Client({
 const sessionsPath = join(WORK_DIR, ".sessions.json");
 const sessionManager = new SessionManager(sessionsPath);
 
-// 5. MemoryManager: 短期メモリ（SQLite）+ 長期メモリ（JSON）
-const memoryDbPath = join(WORK_DIR, "memory", "short-term.db");
+// 5. MemoryManager: 短期メモリ（JSON）+ 長期メモリ（JSON）
+const memoryShortTermPath = join(WORK_DIR, "memory", "short-term.json");
 const memoryLongTermPath = join(WORK_DIR, "memory", "long-term.json");
-const memoryManager = new MemoryManager(memoryDbPath, memoryLongTermPath);
+const memoryManager = new MemoryManager(memoryShortTermPath, memoryLongTermPath);
 memoryManager.initialize();
 
 // 6. RouterAgent: ルーターエージェント（タスク判定・ルーティング）

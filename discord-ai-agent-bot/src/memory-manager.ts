@@ -1,18 +1,20 @@
 /**
  * memory-manager.ts
  *
- * デュアルメモリシステム: 短期メモリ（SQLite）+ 長期メモリ（JSONファイル）
+ * デュアルメモリシステム: 短期メモリ（JSONファイル）+ 長期メモリ（JSONファイル）
  *
  * 短期メモリ:
- *   - better-sqlite3 を使い、チャンネルごとの会話要約を保存
+ *   - チャンネルごとの会話要約をJSONファイルに保存
  *   - チャット履歴が80メッセージを超えたら自動要約・トリム
  *
  * 長期メモリ:
  *   - JSONファイルにユーザーの好み・作業履歴・メモを永続化
  *   - workspace/memory/long-term.json に保存
+ *
+ * ※ better-sqlite3 はNode.js v25+でネイティブビルドに問題があるため、
+ *   短期メモリもJSONファイルベースで実装している。
  */
 
-import Database from "better-sqlite3";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -44,6 +46,9 @@ export interface LongTermMemory {
   user_notes: string[];
 }
 
+/** 短期メモリの保存形式（チャンネルIDをキーにした配列） */
+type ShortTermStore = Record<string, ShortTermMemory[]>;
+
 // ========================================
 // デフォルト値
 // ========================================
@@ -55,21 +60,24 @@ const DEFAULT_LONG_TERM_MEMORY: LongTermMemory = {
   user_notes: [],
 };
 
+/** 短期メモリのID採番用カウンター */
+let nextShortTermId = 1;
+
 // ========================================
 // MemoryManager クラス
 // ========================================
 
 export class MemoryManager {
-  private dbPath: string;
+  private shortTermPath: string;
   private longTermPath: string;
-  private db: Database.Database | null = null;
+  private shortTermStore: ShortTermStore = {};
 
   /**
-   * @param dbPath       SQLiteデータベースファイルのパス
-   * @param longTermPath 長期メモリJSONファイルのパス
+   * @param shortTermPath 短期メモリJSONファイルのパス
+   * @param longTermPath  長期メモリJSONファイルのパス
    */
-  constructor(dbPath: string, longTermPath: string) {
-    this.dbPath = dbPath;
+  constructor(shortTermPath: string, longTermPath: string) {
+    this.shortTermPath = shortTermPath;
     this.longTermPath = longTermPath;
   }
 
@@ -77,37 +85,33 @@ export class MemoryManager {
   // 初期化・終了
   // ========================================
 
-  /** データベースを初期化し、テーブルを作成する */
+  /** メモリファイルを初期化する */
   initialize(): void {
     try {
-      // SQLiteデータベースのディレクトリを確保
-      const dbDir = path.dirname(this.dbPath);
-      if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
+      // 短期メモリのディレクトリを確保
+      const stDir = path.dirname(this.shortTermPath);
+      if (!fs.existsSync(stDir)) {
+        fs.mkdirSync(stDir, { recursive: true });
       }
 
-      // データベースに接続
-      this.db = new Database(this.dbPath);
+      // 短期メモリJSONを読み込み（存在すれば）
+      if (fs.existsSync(this.shortTermPath)) {
+        try {
+          const raw = fs.readFileSync(this.shortTermPath, "utf-8");
+          this.shortTermStore = JSON.parse(raw) as ShortTermStore;
 
-      // WALモードで高速化
-      this.db.pragma("journal_mode = WAL");
-
-      // 短期メモリテーブルを作成
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS short_term_memory (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          channel_id TEXT NOT NULL,
-          summary TEXT NOT NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          message_count INTEGER
-        )
-      `);
-
-      // チャンネルIDでの検索を高速化するインデックス
-      this.db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_short_term_channel
-        ON short_term_memory (channel_id, created_at DESC)
-      `);
+          // 最大IDを算出してカウンターを設定
+          let maxId = 0;
+          for (const entries of Object.values(this.shortTermStore)) {
+            for (const entry of entries) {
+              if (entry.id > maxId) maxId = entry.id;
+            }
+          }
+          nextShortTermId = maxId + 1;
+        } catch {
+          this.shortTermStore = {};
+        }
+      }
 
       // 長期メモリJSONのディレクトリを確保
       const ltDir = path.dirname(this.longTermPath);
@@ -127,17 +131,11 @@ export class MemoryManager {
     }
   }
 
-  /** データベース接続を閉じる */
+  /** リソースを解放する（JSONベースのため特に必要な処理はない） */
   close(): void {
-    try {
-      if (this.db) {
-        this.db.close();
-        this.db = null;
-        console.log("[MemoryManager] データベース接続を閉じました");
-      }
-    } catch (error) {
-      console.error("[MemoryManager] クローズエラー:", error);
-    }
+    // 短期メモリを最終保存
+    this.saveShortTermStore();
+    console.log("[MemoryManager] メモリを保存して終了しました");
   }
 
   // ========================================
@@ -146,8 +144,6 @@ export class MemoryManager {
 
   /**
    * 短期メモリに要約を保存する
-   *
-   * チャット履歴が長くなった場合に、要約を保存してから履歴をトリムする用途。
    *
    * @param channelId    Discordチャンネル ID
    * @param summary      会話の要約テキスト
@@ -158,14 +154,22 @@ export class MemoryManager {
     summary: string,
     messageCount: number
   ): void {
-    this.ensureDb();
-
     try {
-      const stmt = this.db!.prepare(`
-        INSERT INTO short_term_memory (channel_id, summary, message_count)
-        VALUES (?, ?, ?)
-      `);
-      stmt.run(channelId, summary, messageCount);
+      if (!this.shortTermStore[channelId]) {
+        this.shortTermStore[channelId] = [];
+      }
+
+      const entry: ShortTermMemory = {
+        id: nextShortTermId++,
+        channel_id: channelId,
+        summary,
+        created_at: new Date().toISOString(),
+        message_count: messageCount,
+      };
+
+      this.shortTermStore[channelId].push(entry);
+      this.saveShortTermStore();
+
       console.log(
         `[MemoryManager] 短期メモリ保存: channel=${channelId}, messages=${messageCount}`
       );
@@ -176,9 +180,7 @@ export class MemoryManager {
   }
 
   /**
-   * 指定チャンネルの短期メモリを取得する
-   *
-   * 新しい順に返す。limitで最大件数を制限可能。
+   * 指定チャンネルの短期メモリを取得する（新しい順）
    *
    * @param channelId チャンネル ID
    * @param limit     最大取得件数（デフォルト: 10）
@@ -188,18 +190,15 @@ export class MemoryManager {
     channelId: string,
     limit: number = 10
   ): ShortTermMemory[] {
-    this.ensureDb();
-
     try {
-      const stmt = this.db!.prepare(`
-        SELECT id, channel_id, summary, created_at, message_count
-        FROM short_term_memory
-        WHERE channel_id = ?
-        ORDER BY created_at DESC
-        LIMIT ?
-      `);
-      const rows = stmt.all(channelId, limit) as ShortTermMemory[];
-      return rows;
+      const entries = this.shortTermStore[channelId] || [];
+      // 新しい順にソートしてlimit件返す
+      return [...entries]
+        .sort(
+          (a, b) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )
+        .slice(0, limit);
     } catch (error) {
       console.error("[MemoryManager] 短期メモリ取得エラー:", error);
       return [];
@@ -209,25 +208,20 @@ export class MemoryManager {
   /**
    * 短期メモリをクリアする
    *
-   * channelIdを指定した場合はそのチャンネルのみ、
-   * 省略した場合は全チャンネルの短期メモリを削除する。
-   *
    * @param channelId 対象チャンネルID（省略時は全削除）
    */
   clearShortTermMemory(channelId?: string): void {
-    this.ensureDb();
-
     try {
       if (channelId) {
-        const stmt = this.db!.prepare(
-          "DELETE FROM short_term_memory WHERE channel_id = ?"
-        );
-        const result = stmt.run(channelId);
+        const count = (this.shortTermStore[channelId] || []).length;
+        delete this.shortTermStore[channelId];
+        this.saveShortTermStore();
         console.log(
-          `[MemoryManager] 短期メモリクリア: channel=${channelId}, 削除件数=${result.changes}`
+          `[MemoryManager] 短期メモリクリア: channel=${channelId}, 削除件数=${count}`
         );
       } else {
-        this.db!.exec("DELETE FROM short_term_memory");
+        this.shortTermStore = {};
+        this.saveShortTermStore();
         console.log("[MemoryManager] 全短期メモリをクリアしました");
       }
     } catch (error) {
@@ -242,8 +236,6 @@ export class MemoryManager {
 
   /**
    * 長期メモリを読み込んで返す
-   *
-   * ファイルが存在しない場合やパースエラーの場合はデフォルト値を返す。
    *
    * @returns 長期メモリオブジェクト
    */
@@ -270,9 +262,6 @@ export class MemoryManager {
 
   /**
    * ユーザーの好みを追加・更新する
-   *
-   * @param key   好みのキー（例: "coding_language"）
-   * @param value 好みの値（例: "Python"）
    */
   updatePreference(key: string, value: string): void {
     try {
@@ -288,8 +277,6 @@ export class MemoryManager {
 
   /**
    * 作業履歴を追加する
-   *
-   * @param entry 作業履歴エントリ
    */
   addWorkHistory(entry: WorkHistoryEntry): void {
     try {
@@ -304,19 +291,16 @@ export class MemoryManager {
   }
 
   /**
-   * ユーザーノートを追加する
-   *
-   * 重複するノートは追加しない。
-   *
-   * @param note ノート文字列
+   * ユーザーノートを追加する（重複チェックあり）
    */
   addUserNote(note: string): void {
     try {
       const memory = this.getLongTermMemory();
 
-      // 重複チェック
       if (memory.user_notes.includes(note)) {
-        console.log(`[MemoryManager] ユーザーノート重複のためスキップ: ${note}`);
+        console.log(
+          `[MemoryManager] ユーザーノート重複のためスキップ: ${note}`
+        );
         return;
       }
 
@@ -348,8 +332,6 @@ export class MemoryManager {
 
   /**
    * 短期メモリと長期メモリを横断して検索し、関連情報をテキストで返す
-   *
-   * ルーターエージェントがコンテキスト構築に利用する。
    *
    * @param channelId チャンネル ID
    * @param query     検索クエリ
@@ -416,7 +398,6 @@ export class MemoryManager {
       }
     }
 
-    // 結果がない場合
     if (results.length === 0) {
       return `「${query}」に関連するメモリは見つかりませんでした。`;
     }
@@ -428,20 +409,24 @@ export class MemoryManager {
   // プライベートメソッド
   // ========================================
 
-  /** DBが初期化済みであることを確認する */
-  private ensureDb(): void {
-    if (!this.db) {
-      throw new Error(
-        "[MemoryManager] データベースが初期化されていません。initialize() を先に呼び出してください。"
+  /** 短期メモリをJSONファイルに保存する */
+  private saveShortTermStore(): void {
+    try {
+      const dir = path.dirname(this.shortTermPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(
+        this.shortTermPath,
+        JSON.stringify(this.shortTermStore, null, 2),
+        "utf-8"
       );
+    } catch (error) {
+      console.error("[MemoryManager] 短期メモリ保存エラー:", error);
     }
   }
 
-  /**
-   * 長期メモリをJSONファイルに保存する
-   *
-   * @param memory 保存する長期メモリオブジェクト
-   */
+  /** 長期メモリをJSONファイルに保存する */
   private saveLongTermMemory(memory: LongTermMemory): void {
     try {
       const dir = path.dirname(this.longTermPath);
