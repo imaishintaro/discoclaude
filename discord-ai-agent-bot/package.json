@@ -1,0 +1,38 @@
+{
+  "name": "discord-ai-agent-bot",
+  "version": "2.1.0",
+  "description": "Discord AIエージェントボット - ルーターエージェント + 専門チーム",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "deploy-commands": "tsc && node dist/deploy-commands.js"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.46",
+    "@ai-sdk/openai": "^3.0.30",
+    "@langchain/core": "^0.3.0",
+    "@langchain/langgraph": "^0.2.0",
+    "ai": "^6.0.97",
+    "better-sqlite3": "^9.6.0",
+    "canvas": "^2.11.2",
+    "chokidar": "^3.6.0",
+    "discord.js": "^14.18.0",
+    "docx": "^8.5.0",
+    "dotenv": "^16.4.7",
+    "js-yaml": "^4.1.1",
+    "node-schedule": "^2.1.1",
+    "pptxgenjs": "^3.12.0",
+    "sharp": "^0.33.0",
+    "tavily": "^0.0.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "@types/node-schedule": "^2.1.8",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "default": "anthropic/claude-sonnet-4-20250514",
+  "options": {
+    "fast": "google/gemini-flash-1.5",
+    "balanced": "anthropic/claude-sonnet-4-20250514",
+    "powerful": "anthropic/claude-opus-4-20250514",
+    "coding": "deepseek/deepseek-r1"
+  },
+  "task_defaults": {
+    "chat": "fast",
+    "coding": "coding",
+    "ppt": "balanced",
+    "report": "balanced",
+    "image": "balanced",
+    "router": "balanced"
+  }
+}
